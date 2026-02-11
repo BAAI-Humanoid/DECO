@@ -1,0 +1,10 @@
+*pycache*
+*.pyc
+*.egg-info
+*build/
+*.pem
+*.srl
+*.csr
+*.key
+*.cnf
+.vscode/

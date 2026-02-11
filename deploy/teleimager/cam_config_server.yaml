@@ -1,0 +1,46 @@
+# =====================================================
+# Head camera configuration
+# =====================================================
+# camera topic
+head_camera:
+  # camera config
+
+  # if enable_zmq and enable_webrtc are both false, the camera will not start
+  # Set to true to enable ZMQ publishing, false to disable
+  enable_zmq: true
+  # Port to publish camera stream, e.g. zmq tcp://*:55555.  image_client.py should connect to the same port
+  zmq_port : 55555
+  # Set to true to enable WebRTC publishing, false to disable
+  enable_webrtc: false
+  # Port for WebRTC signaling server
+  webrtc_port : 60001
+
+  # Type of camera:
+  #   - "opencv"    → opencv driver
+  #   - "realsense" → pyrealsense2 driver
+  #   - "uvc"       → pyuvc driver
+  type: zed
+  enable_depth: true
+  enable_point_cloud: true
+  depth_port: 55556
+  pointcloud_port: 55557
+  binocular: true
+  
+  # Image Format
+  # ZED双目相机分辨率 (拼接后的宽度 = 单目宽度 × 2):
+  #   HD720:  [720, 2560]  (左: 1280×720, 右: 1280×720, 拼接: 2560×720) @ 30/60fps
+  #   HD1080: [1080, 3840] (左: 1920×1080, 右: 1920×1080, 拼接: 3840×1080) @ 30fps
+  image_shape: [1080, 3840]
+  
+  # frame per second
+  fps: 30
+
+  # ZED Camera 序列号 (可选)
+  #   - 如果有多个ZED相机，填入序列号以指定使用哪个
+  #   - 如果只有一个ZED相机，设置为 null (会自动使用第一个)
+  #   - 示例: serial_number: 12345678
+  #   - 查看序列号: 运行 ZED Explorer 或查看相机标签
+  serial_number: null
+  
+  # 注意: ZED相机不使用 video_id 和 physical_path
+  # 这些参数仅用于 OpenCV/UVC 相机
