@@ -3,7 +3,7 @@
   <a href="https://arxiv.org/pdf/2602.05513">
     <img src="https://img.shields.io/badge/arXiv-Paper-b31b1b?logo=arxiv">
   </a>
-  <a href="https://yourprojectpage.com">
+  <a href="https://baai-humanoid.github.io/DECO-webpage/">
     <img src="https://img.shields.io/badge/Project-Website-blue">
   </a>
   <a href="https://huggingface.co/datasets/BAAI-Humanoid/DECO-50">
@@ -22,11 +22,56 @@ pip install -r requirements.txt
 ```
 
 ## 2. Prepare for Dataset
-### Using the DECO-50 Dataset
+### Using the DECO-50 Dataset （Coming soon）
 - Download the dataset
 ```bash
-hf download <dataset-identifier> --repo-type dataset --local-dir ./
+hf download BAAI-Humanoid/DECO-50 --repo-type dataset --local-dir ./
 ```
+- Batch unzip files
+
+<details>
+<summary><b>Click to expand full command for unzip</b></summary>
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SRC_ROOT="./BAAI-Humanoid/DECO-50"
+DST_ROOT="./BAAI-Humanoid/DECO-50-unpack"
+
+PARALLEL_JOBS=8
+
+
+mkdir -p "$DST_ROOT"
+
+unpack_one() {
+    tar_file="$1"
+    rel="${tar_file#$SRC_ROOT/}"
+    rel_dir="${rel%.tar.gz}"
+
+    out_dir="$DST_ROOT/$rel_dir"
+
+    if [[ -d "$out_dir" ]]; then
+        echo "Skip existing $rel_dir"
+        return
+    fi
+
+    mkdir -p "$(dirname "$out_dir")"
+    echo "Unpacking $rel_dir"
+
+    tar -xzf "$tar_file" -C "$(dirname "$out_dir")"
+}
+
+export -f unpack_one
+export SRC_ROOT DST_ROOT
+
+find "$SRC_ROOT" -type f -name "*.tar.gz" -print0 \
+| xargs -0 -n 1 -P "$PARALLEL_JOBS" bash -c 'unpack_one "$@"' _
+
+echo "All episodes unpacked."
+```
+</details>
+
 - Merge the dataset
 ```bash
 # This will combine all sub-tasks under a task into a single directory.
