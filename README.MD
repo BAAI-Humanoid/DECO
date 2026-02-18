@@ -22,7 +22,7 @@ pip install -r requirements.txt
 ```
 
 ## 2. Prepare for Dataset
-### Using the DECO-50 Dataset （Coming soon）
+### Using the DECO-50 Dataset
 - Download the dataset
 ```bash
 hf download BAAI-Humanoid/DECO-50 --repo-type dataset --local-dir ./
