@@ -247,3 +247,6 @@ If you find this project useful for your research, please consider citing our pa
 ```
 # License
 This project is released under the Apache 2.0 license.
+
+## Contact
+We are hiring!!! Full-time researchers, engineers, interns and PhD students are all open for recruitment. If you are interested in working with us on whole-body mobile manipulation for humanoid robots, please contact hitsunzhenguo@gmail.com.
