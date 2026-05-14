@@ -1,4 +1,4 @@
-# (ICML2026) DECO: Decoupled Multimodal Diffusion Transformer for Bimanual Dexterous Manipulation with a Plugin Tactile Adapter
+# DECO: Decoupled Multimodal Diffusion Transformer for Bimanual Dexterous Manipulation with a Plugin Tactile Adapter
 <p>
   <a href="https://arxiv.org/pdf/2602.05513">
     <img src="https://img.shields.io/badge/arXiv-Paper-b31b1b?logo=arxiv">
