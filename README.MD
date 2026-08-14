@@ -9,6 +9,9 @@
   <a href="https://huggingface.co/datasets/BAAI-Humanoid/DECO-50">
     <img src="https://img.shields.io/badge/HuggingFace-Data-yellow?logo=huggingface">
   </a>
+  <a href="https://huggingface.co/BAAI-Humanoid/DECO_sim">
+    <img src="https://img.shields.io/badge/HuggingFace-Model-red?logo=huggingface">
+  </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache--2.0-green">
   </a>
