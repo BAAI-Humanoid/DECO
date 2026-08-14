@@ -9,10 +9,49 @@
   <a href="https://huggingface.co/datasets/BAAI-Humanoid/DECO-50">
     <img src="https://img.shields.io/badge/HuggingFace-Data-yellow?logo=huggingface">
   </a>
+  <a href="https://huggingface.co/BAAI-Humanoid/DECO_sim">
+    <img src="https://img.shields.io/badge/HuggingFace-Model-red?logo=huggingface">
+  </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache--2.0-green">
   </a>
 </p>
+
+# News
+- We now support training and evaluation on four simulation benchmarks: LIBERO, DexJoCo, UniVTAC, and RoboTwin.
+- Separate branches are maintained to accommodate real-robot deployment and the different data formats and evaluation protocols of each simulator.
+- LIBERO, DexJoCo, and UniVTAC are on the `sim` branch.
+- RoboTwin adds a T5 encoder and an improved training data format; see the `robotwin` branch for details.
+- Our 80M model achieves near-SOTA results across the four benchmarks, summarized below.
+
+**LIBERO** — success rates (50 trials per task):
+
+| Model | Spatial | Object | Goal | Long | **Average** |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| DECO | 94.2% | 99.4% | 96.8% | 86.4% | **94.2%** |
+
+**DexJoCo** — success rates (50 trials per task); `/B` denotes a bimanual task:
+
+| Model | Hammer Nail | Click Mouse | Pick Bucket | Pinch Tongs | Fold Glasses | Water Plant | Unlock iPad /B | Hanoi /B | Assembly /B | Microwave /B | Photograph /B | **Average** |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| DECO (rand-obj) | 68% | 90% | 80% | 46% | 50% | 88% | 40% | 18% | 0% | 64% | 76% | **56.4%** |
+| DECO (rand-full) | 66% | 82% | 88% | 52% | 52% | 80% | 40% | 24% | 16% | 72% | 66% | **58%** |
+
+**UniVTAC** — success rates (100 trials per task):
+
+| Model | grasp_classify | lift_can | lift_bottle | pull_out_key | put_bottle_in_shelf | insert_hole | insert_tube | insert_HDMI | **Average** |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| DECO (vision) | 96.0% | 99.0% | 100.0% | 96.0% | 90.0% | 63.0% | 88.0% | 25.0% | **82.1%** |
+| DECO.p (+tactile) | 99.0% | 99.0% | 100.0% | 96.0% | 93.0% | 59.0% | 88.0% | 23.0% | **82.1%** |
+
+**RoboTwin** — overall average success rates (100 trials per task):
+
+| Setting | Clean | Randomized | **Avg.** |
+|:---:|:---:|:---:|:---:|
+| Seen | 86.56% | 84.76% | **85.66%** |
+| Unseen | 86.32% | 84.36% | **85.34%** |
+
+
 
 # Quick start Example 
 ## 1. Installation
@@ -81,10 +120,10 @@ python utils/merge.py
 ```bash
 python utils/cal_mean_std.py --data-path ./Deco-50/task1_merged --save-path ./Deco-50/task1_statistics
 ```
-- Transfer the computed statistics to the corresponding fields in [`config/`](https://github.com/1343744768/IL_training_codebase/blob/master/config/deco.yaml#L25).
+- Transfer the computed statistics to the corresponding fields in `config/`.
 - Alternatively, you may use the precomputed statistics provided with the DECO-50 dataset.
 ### Using Your Custom Dataset. 
-- If tactile data is unavailable, please modify [`dataset.py`](https://github.com/1343744768/IL_training_codebase/blob/master/dataset.py#L98) by assigning dummy values to `tac1` and `tac2` before returning them. Additionally, set [`use_tactile`](https://github.com/1343744768/IL_training_codebase/blob/master/config/deco.yaml#L8) to `False`.
+- If tactile data is unavailable, please modify `dataset.py` by assigning dummy values to `tac1` and `tac2` before returning them. Additionally, set `use_tactile` to `False`.
 - Your own dataset should follow the structure below:
 ```
 Dataset/
@@ -114,7 +153,7 @@ condition_indx: int,  # Index of the task condition
 ```
 
 ## 3. Hyperparameters for models
-- Configuration files for different models (e.g., ACT, DP, DECO) are provided in the [`config`](https://github.com/1343744768/IL_training_codebase/tree/master/config) directory.
+- Configuration files for different models (e.g., ACT, DP, DECO) are provided in the `config` directory.
 - Below we describe the key configuration parameters for DECO.
 <details>
 <summary><b>Click to expand full YAML configuration for DECO</b></summary>
