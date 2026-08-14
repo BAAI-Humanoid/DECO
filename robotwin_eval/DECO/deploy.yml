@@ -1,0 +1,18 @@
+# Basic experiment configuration (merged with CLI overrides by setup_policy_server.py)
+policy_name: DECO
+protocol: ws
+host: localhost
+port: null
+bench_name: null
+task_name: null
+ckpt_name: null
+env_cfg_type: null
+action_type: joint
+seed: 0
+eval_batch: false
+ws_ping_interval_s: 20.0
+ws_ping_timeout_s: 20.0
+
+# DECO-specific settings (all optional):
+#   t5_path:         /share/yusun/models/t5_base
+#   pretrained_path: /share/yusun/models/deco/best.pth

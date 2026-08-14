@@ -4,14 +4,14 @@ import time
 import random
 import scipy
 import argparse
-import importlib
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
-from dataset import my_Dataset, letterbox
+from dataset import leDataset
+from models import modeling, train as train_epoch, val as val_epoch
 from torchvision.transforms import v2 as transforms
 try:
     from torch.optim.lr_scheduler import _LRScheduler
@@ -113,7 +113,10 @@ class LossHistory():
 
 def main(opt):
     import os
-    os.environ['CUDA_VISIBLE_DEVICES'] = opt.device_id
+    # NOTE: Do NOT override CUDA_VISIBLE_DEVICES in distributed mode;
+    # torchrun sets it correctly per process. Only override for single-node.
+    if not opt.distributed:
+        os.environ['CUDA_VISIBLE_DEVICES'] = opt.device_id
     Cuda = True if torch.cuda.is_available() else False
     ngpus_per_node = torch.cuda.device_count()
     old_dir = opt.logs
@@ -121,14 +124,17 @@ def main(opt):
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
         rank = int(os.environ["RANK"])
-        dist.init_process_group(backend="nccl")
-        if local_rank == 0:
-            print(f"[{os.getpid()}] (rank = {rank}, local_rank = {local_rank}) training...")
-            print("GPU Device Count : ", ngpus_per_node)
+        world_size = int(os.environ["WORLD_SIZE"])
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, device_id=torch.device(f"cuda:{local_rank}"))
+        if rank == 0:
+            print(f"[{os.getpid()}] (rank = {rank}, local_rank = {local_rank}, world_size = {world_size}) training...")
+            print("GPU Device Count per node: ", ngpus_per_node)
     else:
         local_rank = 0
+        rank = 0
+        world_size = 1
 
-    if local_rank == 0:
+    if rank == 0:
         if os.path.exists(opt.logs):
             print('log dir exists, change to a new dir')
             opt.logs = opt.logs + str(random.randint(0, 1000))
@@ -143,26 +149,23 @@ def main(opt):
     else:
         loss_history = None
 
+    if opt.distributed:
+        dist.barrier(device_ids=[local_rank])
+        # Broadcast opt.logs to all ranks (rank 0 may have changed it)
+        obj_list = [opt.logs]
+        dist.broadcast_object_list(obj_list, src=0)
+        opt.logs = obj_list[0]
+
 
     config = yaml.safe_load(open(opt.config, 'r'))
-    act_dim, chunksize, obs_state = config['model']['action_dim'], config['model']['chunk_size'], config['model']['obs_state']
-    img_size = config['img']['img_size']
-    img_mean, img_std = config['img']['img_mean'], config['img']['img_std']
-    model_name = config['model_name']
-    find_unused_parameters = model_name == 'deco'
-    importmodule = importlib.import_module(f"models.{model_name}")
-
-    if img_size[0] != img_size[1]:
-        print('use transform.Resize to ', img_size)
-        resize_transform = transforms.Resize(img_size)
-    else:
-        print('use letterbox to ', img_size)
-        resize_transform = letterbox(img_size[0], fill=128)
+    act_dim, chunksize = config['model']['action_dim'], config['model']['chunk_size']
+    img_size = config['data']['img_size']
+    img_mean, img_std = config['data']['img_mean'], config['data']['img_std']
         
     train_transform = transforms.Compose([
-        resize_transform,
+        transforms.Resize(img_size),
         transforms.RandomApply([transforms.ColorJitter(brightness=(0.7, 1.3), contrast=(0.8, 1.2), saturation=(0.8, 1.2))], p=0.5),
-        transforms.RandomApply([transforms.GaussianBlur(kernel_size=(random.choice([3, 5, 7])), sigma=random.uniform(0.1, 2))], p=0.5),
+        transforms.RandomApply([transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2))], p=0.5),
         transforms.ToImage(),
         transforms.ToDtype(torch.float32, scale=True),
         transforms.Normalize(
@@ -171,20 +174,20 @@ def main(opt):
         ])
 
     test_transform = transforms.Compose([
-        resize_transform,
+        transforms.Resize(img_size),
         transforms.ToImage(),
         transforms.ToDtype(torch.float32, scale=True),
         transforms.Normalize(
             mean=img_mean, 
             std=img_std)
         ])
-    train_dataset = my_Dataset(data_dir=opt.data, train=True, transform=train_transform, **config['data'])
-    test_dataset = my_Dataset(data_dir=opt.data, train=False, transform=test_transform, **config['data'])
+    train_dataset = leDataset(data_dir=opt.data, train=True, transform=train_transform, **config['data'])
+    test_dataset = leDataset(data_dir=opt.data, train=False, transform=test_transform, **config['data'])
 
     if opt.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)
         val_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, shuffle=False)
-        batch_size = opt.batch_size // ngpus_per_node
+        batch_size = opt.batch_size // world_size
         shuffle = False
     else:
         batch_size = opt.batch_size
@@ -193,20 +196,18 @@ def main(opt):
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle,
                                                num_workers=opt.num_workers, pin_memory=True, drop_last=True,
-                                               sampler=train_sampler)
+                                               sampler=train_sampler, persistent_workers=True, prefetch_factor=2)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle,
                                               num_workers=opt.num_workers, pin_memory=True, drop_last=True,
-                                              sampler=val_sampler)
+                                              sampler=val_sampler, persistent_workers=True, prefetch_factor=2)
 
-    net = importmodule.modeling(**config['model']) 
+    net = modeling(**config['model']) 
         
     if Cuda:
         if opt.distributed:  # DDP
             net = net.cuda(local_rank)
-            for param in net.parameters():  
-                dist.broadcast(param.data, src=0)
             net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], output_device=local_rank,
-                                                            find_unused_parameters=find_unused_parameters)
+                                                            find_unused_parameters=True)
             net_without_ddp = net.module
             cudnn.benchmark = True
         else:
@@ -224,28 +225,27 @@ def main(opt):
         net_without_ddp = net
 
     if opt.amp:
-        from torch.cuda.amp import GradScaler as GradScaler
+        from torch.amp import GradScaler as GradScaler
         scaler = GradScaler()
     else:
         scaler = None
 
     if not opt.adamw:
-        if local_rank == 0:
+        if rank == 0:
             print('use sgd')
         optimizer = torch.optim.SGD(params=(p for p in net_without_ddp.parameters() if p.requires_grad), lr=opt.lr, momentum=0.843, weight_decay=0.00036)
     else:
-        if local_rank == 0:
+        if rank == 0:
             print('use adamw')
         optimizer = torch.optim.AdamW(params=(p for p in net_without_ddp.parameters() if p.requires_grad), lr=opt.lr, betas=(0.95, 0.999), weight_decay=1e-6)
 
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.epochs, eta_min=opt.lr_f)
-    warmup_scheduler = WarmUpLR(optimizer, len(train_loader) * opt.warm_up_epoch)
-    criterion = torch.nn.L1Loss(reduction='none')
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.epochs * len(train_loader), eta_min=opt.lr_f)  # cosine LR decays per step; T_max = total training steps
+    warmup_scheduler = WarmUpLR(optimizer, opt.warm_up_steps)  # warmup decays per step; total warm_up_steps steps
 
     if opt.resume:
-        if local_rank == 0:
+        if rank == 0:
             print('resume from last weights')
-        checkpoint = torch.load(os.path.join(old_dir, "last_weights.pth"), map_location='cpu')  # 读取之前保存的权重文件(包括优化器以及学习率策略)
+        checkpoint = torch.load(os.path.join(old_dir, "last_weights.pth"), map_location='cpu')  # load previously saved weights (including optimizer and LR scheduler state)
         net_without_ddp.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -261,20 +261,17 @@ def main(opt):
     for epoch in range(start_epoch, opt.epochs + 1):
         if opt.distributed:
             train_sampler.set_epoch(epoch)
-        train_loss = importmodule.train(net, net_without_ddp, train_loader, optimizer, criterion, warmup_scheduler, epoch, opt, act_dim, obs_state, scaler, local_rank)
+        train_loss = train_epoch(net, net_without_ddp, train_loader, optimizer, warmup_scheduler, lr_scheduler, epoch, opt, scaler, local_rank, rank)
         if epoch % opt.val_per_epoch == 0:
-            val_loss = importmodule.val(net, test_loader, criterion, epoch, opt, act_dim, chunksize, obs_state, local_rank)
+            val_loss = val_epoch(net, test_loader, epoch, opt, act_dim, chunksize, local_rank, rank)
         if val_loss < loss:
             loss = val_loss
             save_epoch = epoch
-            if local_rank == 0:
+            if rank == 0:
                 print('save best model to logs!')
                 torch.save(net_without_ddp.state_dict(), os.path.join(opt.logs, 'best.pth'))
                 
-        if epoch > opt.warm_up_epoch:
-            lr_scheduler.step()
-            
-        if local_rank == 0:
+        if rank == 0:
             loss_history.append_loss(train_loss, val_loss)
             print('current best epoch:', save_epoch, '\n')
             print('lr:', optimizer.state_dict()['param_groups'][0]['lr'], '\n')
@@ -292,17 +289,17 @@ def main(opt):
 if __name__ == '__main__':
     start_time = time.time()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='./config/deco.yaml', help='Path to configuration YAML file')
-    parser.add_argument('--data', type=str, default='./data', help='Path to dataset directory')
+    parser.add_argument('--config', type=str, default='/home/sunyu/galbot/codes/robotwin/config/DECO_robotwin.yaml', help='Path to configuration YAML file')
+    parser.add_argument('--data', type=str, default='/home/sunyu/yusun/dataset/robotwin/rand_ori', help='Path to dataset directory')
     parser.add_argument('--adamw', default=True, type=bool, help='Use AdamW optimizer instead of SGD')
     parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate')
-    parser.add_argument('--lr_f', type=float, default=5e-6, help='Final learning rate (minimum for cosine annealing)')
-    parser.add_argument('--batch-size', type=int, default=128*8, help='Total batch size across all GPUs')
-    parser.add_argument('--warm_up_epoch', type=int, default=1, help='Number of warmup epochs for learning rate')
-    parser.add_argument('--epochs', type=int, default=200, help='Total number of training epochs')
-    parser.add_argument('--val_per_epoch', type=int, default=1, help='Number of epochs between validations')
-    parser.add_argument('--logs', type=str, default='./logs/log_dp', help='Directory to save logs and models')
-    parser.add_argument('--save_period', type=int, default=20, help='Number of epochs between model checkpoints')
+    parser.add_argument('--lr_f', type=float, default=1e-6, help='Final learning rate (minimum for cosine annealing)')
+    parser.add_argument('--batch-size', type=int, default=64*8, help='Total batch size across all GPUs')
+    parser.add_argument('--warm_up_steps', type=int, default=300, help='Number of warmup steps for learning rate')
+    parser.add_argument('--epochs', type=int, default=40, help='Total number of training epochs')
+    parser.add_argument('--val_per_epoch', type=int, default=10, help='Number of epochs between validations')
+    parser.add_argument('--logs', type=str, default='/home/sunyu/galbot/codes/logs', help='Directory to save logs and models')
+    parser.add_argument('--save_period', type=int, default=10, help='Number of epochs between model checkpoints')
     parser.add_argument('--resume', action='store_true', help='Resume training from the most recent checkpoint')
     parser.add_argument('--local_rank', default=-1, type=int, help='Local rank for distributed training (auto-set by torch.distributed)')
     parser.add_argument('--distributed', default=True, type=bool, help='Enable Distributed Data Parallel (DDP) training')
