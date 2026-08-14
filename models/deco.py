@@ -12,7 +12,7 @@ from models.rope import apply_rotary_emb, RotaryPosEmbed
 
 
 class DECO(nn.Module):
-    def __init__(self, act_dim, chunk_size, n_view=2, obs_state=True, obs_dim=None, use_tactile=False, plugin=False, plugin_rank=32, use_prompt=False, inf_step=5, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=[256, 256]):
+    def __init__(self, act_dim, chunk_size, n_view=2, obs_state=True, obs_dim=None, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=[256, 256]):
         super().__init__()
         head_dim = dim // heads
         self.head_dim = head_dim
@@ -21,7 +21,7 @@ class DECO(nn.Module):
         self.act_dim = act_dim
         self.obs_state = obs_state
         self.use_tactile = use_tactile
-        self.use_prompt = use_prompt
+        self.use_task_condition = use_task_condition
         self.inference_step = inf_step
         self.rope = RotaryPosEmbed(head_dim, rope_axes_dim)  # initial mrope embedding
         resnet = resnet34(weights="ResNet34_Weights.IMAGENET1K_V1")
@@ -47,11 +47,8 @@ class DECO(nn.Module):
             nn.init.trunc_normal_(self.tac_pos_embed, std=0.02)
             self.tac_idx_embedd = nn.Embedding(n_view, dim)  # distinguish left/right sensors
         
-        if self.use_prompt:
-            self.prompt_head = nn.Sequential(
-                nn.Linear(768, dim),
-                nn.LayerNorm(dim)
-            )
+        if self.use_task_condition:
+            self.task_encoder = nn.Embedding(num_tasks, dim)
 
         self.time_embedd = nn.Sequential(
             timeEmb(dim),
@@ -66,21 +63,20 @@ class DECO(nn.Module):
             nn.Linear(dim, dim)
         )
 
-        self.mmattn = nn.ModuleList([MMAttention(heads, dim, use_prompt, use_tactile, plugin, plugin_rank) for _ in range(num_attn_blocks)])  # joint attention blocks
+        self.mmattn = nn.ModuleList([MMAttention(heads, dim, use_tactile, plugin, plugin_rank) for _ in range(num_attn_blocks)])  # joint attention blocks
         self.linear = nn.Linear(dim, act_dim) # final action prediction head
 
         if not plugin:
             self.initialize_weights()
 
 
-    def forward(self, imgs, obs=None, act=None, prompt=None, prompt_mask=None, tacs=None, training=True):
+    def forward(self, imgs, obs=None, act=None, task_idx=None, tacs=None, action_mask=None, training=True):
         """
         Args:
             imgs: [B, n_view, C, H, W]
             obs: [B, 28]
             act: [B, chunk, 28]
-            prompt: [B, len, 768]
-            prompt_mask: [B, len]
+            task_idx: [B, ]
             tacs: [B, n_view, ...]
             training: bool
         """
@@ -94,8 +90,8 @@ class DECO(nn.Module):
 
         if self.obs_state:
             obs = self.obs_encoder(obs)  # (b, act_dim) --> (b, dim)
-        if self.use_prompt: # onehot condition for different sub-tasks
-            task_emb = self.prompt_head(prompt) # (b, len, 768) --> (b, len, dim)
+        if self.use_task_condition: # onehot condition for different sub-tasks
+            task_emb = self.task_encoder(task_idx) # (b, ) --> (b, dim)
 
         if training:
             t = torch.sigmoid(torch.randn((act.shape[0],), device=act.device))  # t in [0, 1] (b, )
@@ -103,7 +99,9 @@ class DECO(nn.Module):
             t = self.time_embedd(t)  # time embedding, (b, ) --> (b, dim)
             if self.obs_state:
                 t = t + obs
-            feat, act = self.atten_forward(feat, act, image_rotary_emb=image_rotary_emb, t=t, tactile=tactile, prompt=task_emb, prompt_mask=prompt_mask)
+            if self.use_task_condition:
+                t = t + task_emb
+            feat, act = self.atten_forward(feat, act, image_rotary_emb=image_rotary_emb, t=t, tactile=tactile)
             return act, noise
 
         else:
@@ -114,7 +112,9 @@ class DECO(nn.Module):
                 t_vec = self.time_embedd(t_vec)  # time embedding
                 if self.obs_state:
                     t_vec = t_vec + obs
-                _, denoise_act = self.atten_forward(feat, sample, image_rotary_emb=image_rotary_emb, t=t_vec, tactile=tactile, prompt=task_emb, prompt_mask=prompt_mask)
+                if self.use_task_condition:
+                    t_vec = t_vec + task_emb
+                _, denoise_act = self.atten_forward(feat, sample, image_rotary_emb=image_rotary_emb, t=t_vec, tactile=tactile)
                 # denoise_act : noise - action
                 # t_prev - t_curr < 0 ---> -|△t|
                 # action =  noise_act + |△t| * (action - noise)
@@ -179,12 +179,12 @@ class DECO(nn.Module):
         return feat, image_rotary_emb
 
 
-    def atten_forward(self, img, act, image_rotary_emb, t, tactile=None, prompt=None, prompt_mask=None):
+    def atten_forward(self, img, act, image_rotary_emb, t, tactile=None):
         act = self.action_encoder(act)   # (b, seq_len, act_dim) --> (b, seq_len, dim)
         act = act + self.action_embedd   # add learnable action positional embedding
 
         for mma in self.mmattn:
-            img, act = mma(img, act, t, image_rotary_emb, tactile, prompt, prompt_mask) 
+            img, act = mma(img, act, t, image_rotary_emb, tactile) 
 
         act = self.linear(act)
         return img, act
@@ -230,13 +230,12 @@ class PI_Adapter(nn.Module):
 
 
 class MMAttention(nn.Module):
-    def __init__(self, heads=8, dim=512, use_prompt=False, use_tactile=False, plugin=False, plugin_rank=32):
+    def __init__(self, heads=8, dim=512, use_tactile=False, plugin=False, plugin_rank=32):
         super().__init__()
         head_dim = dim // heads
         self.head_dim = dim // heads
         self.head = heads
         self.use_tactile = use_tactile
-        self.use_prompt = use_prompt
         self.plugin = plugin
 
         ### img projection
@@ -270,9 +269,6 @@ class MMAttention(nn.Module):
             nn.GELU(approximate="tanh"),
             nn.Linear(dim*4, dim, bias=True),
         )
-        if self.use_prompt:
-            self.prompt_key = nn.Linear(dim, dim)
-            self.prompt_value = nn.Linear(dim, dim)
 
         ### cross attention for tactile
         if self.use_tactile:
@@ -289,7 +285,7 @@ class MMAttention(nn.Module):
                 self.act_mlp_pi = PI_Adapter(dim, dim, plugin_rank)
 
 
-    def forward(self, img, act, t, image_rotary_emb, tactile=None, prompt=None, prompt_mask=None):
+    def forward(self, img, act, t, image_rotary_emb, tactile=None):
         """
         Args:
             img: [B, 2*img_len, dim]
@@ -344,17 +340,6 @@ class MMAttention(nn.Module):
 
             cross_attn = F.scaled_dot_product_attention(q, tactile_k, tactile_v)  # joint attention with tactile
             attn = attn + cross_attn  # combine attention outputs
-
-        if self.use_prompt and prompt is not None:
-            prompt_k = self.prompt_key(prompt)  # [B, len, dim]
-            prompt_v = self.prompt_value(prompt)  # [B, len, dim]
-            prompt_k = einops.rearrange(prompt_k, "B L (H D) -> B H L D", H=self.head, D=self.head_dim)
-            prompt_v = einops.rearrange(prompt_v, "B L (H D) -> B H L D", H=self.head, D=self.head_dim)
-
-            # Masked attention for prompt tokens
-            prompt_mask = prompt_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, len]
-            cross_attn_prompt = F.scaled_dot_product_attention(q, prompt_k, prompt_v, attn_mask=prompt_mask)
-            attn = attn + cross_attn_prompt  # combine attention outputs    
         
         attn = einops.rearrange(attn, "B H L D -> B L (H D)")
         img_attn, act_attn = attn[:, :total_img_len, :], attn[:, total_img_len:, :]  # split img and action
@@ -430,7 +415,7 @@ class timeEmb(nn.Module):
         return emb
     
 
-def modeling(action_dim, chunk_size, n_view=2, obs_state=True, obs_dim=None, use_prompt=False, use_tactile=False, plugin=False, plugin_rank=32,  inf_step=5, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=(256, 256), pretrain_model_path=False, adapter_model_path=False):
+def modeling(action_dim, chunk_size, n_view=2, obs_state=True, obs_dim=None, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=(256, 256), pretrain_model_path=False, adapter_model_path=False):
     DeCO = DECO(
             act_dim=action_dim,
             chunk_size=chunk_size,
@@ -440,7 +425,8 @@ def modeling(action_dim, chunk_size, n_view=2, obs_state=True, obs_dim=None, use
             use_tactile=use_tactile,
             plugin=plugin,
             plugin_rank=plugin_rank,
-            use_prompt=use_prompt,
+            use_task_condition=use_task_condition,
+            num_tasks=num_tasks,
             inf_step=inf_step,
             num_attn_blocks=num_attn_blocks,
             heads=heads,
@@ -488,27 +474,31 @@ def modeling(action_dim, chunk_size, n_view=2, obs_state=True, obs_dim=None, use
 
 
 if __name__ == '__main__':
-    # model = torch.load('/root/yusun/ICML_codes/IL_training_codebase/models/mmrdt/1.pth')
-    # total_params = 0
-    # for k, v in model.items():
-    #     print(k, v.shape)
-    #     num = v.numel()
-    #     total_params += num
-    # print(f"\nTotal params: {total_params:,}")
-
     import yaml 
-    with open('/home/sunyu/galbot/codes/robotwin/config/DECO_robotwin.yaml', 'r') as f:
+    with open('./config/deco_univtac_80m.yaml', 'r') as f:
         config = yaml.safe_load(f)
     model = modeling(**config['model'])
 
-    imgs = torch.randn(1, 2, 3, 192, 256)
-    obs = torch.randn(1, 14)
-    act = torch.randn(1, 32, 14)
-    prompt = torch.randn(1, 64, 768)
-    prompt_mask = torch.zeros(1, 64)
-
-    act_train, _ = model(imgs, obs=obs, act=act, prompt=prompt, prompt_mask=prompt_mask, training=True)
-    act_pred = model(imgs, obs=obs, prompt=prompt, prompt_mask=prompt_mask, training=False)
-    print(act_train.shape, act_pred.shape)
     from torchinfo import summary
-    summary(model, input_data=(imgs, obs, act, prompt, prompt_mask), device='cpu')
+    imgs = torch.randn(1, 2, 3, 180, 320)
+    tacs = torch.randn(1, 2, 3, 180, 240)
+    obs = torch.randn(1, 9)
+    act = torch.randn(1, 16, 9)
+    task_idx = torch.randint(0, 8, (1,))
+    
+    # tac encoding test
+    B, n_view = tacs.shape[:2]
+    # Flatten batch and view dims for shared encoder
+    tacs_flat = tacs.view(B * n_view, *tacs.shape[2:])  # [B*n_view, C, H, W]
+    print("tacs_flat shape: ", tacs_flat.shape)
+    feat = model.tac_encoder(tacs_flat)  # [B*n_view, dim, h, w]
+    print("feat shape: ", feat.shape)
+    feat = model.tac_head(feat)  # [B*n_view, dim, h, w]
+    print("feat shape: ", feat.shape)
+    
+    
+    act_train, _ = model(imgs, obs=obs, act=act, task_idx=task_idx, tacs=tacs, training=True)
+    act_pred = model(imgs, obs=obs, task_idx=task_idx, tacs=tacs, training=False)
+    print(act_train.shape, act_pred.shape)
+    
+    # summary(model, input_data=(imgs, obs, act, task_idx, tac1, tac2), device='cpu')

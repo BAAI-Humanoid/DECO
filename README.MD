@@ -9,109 +9,140 @@
   <a href="https://huggingface.co/datasets/BAAI-Humanoid/DECO-50">
     <img src="https://img.shields.io/badge/HuggingFace-Data-yellow?logo=huggingface">
   </a>
+  <a href="https://huggingface.co/BAAI-Humanoid/DECO_sim">
+    <img src="https://img.shields.io/badge/HuggingFace-Model-red?logo=huggingface">
+  </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache--2.0-green">
   </a>
 </p>
 
-# Quick Start
+# Quick Start Example
 ## 1. Installation
-The code has been tested with Python 3.12, PyTorch 2.11, and CUDA 13.0. We strongly recommend installing torchcodec by following [this page](https://github.com/meta-pytorch/torchcodec); otherwise, the dataloader will be slow when using the PyAV decoder with a large batch size during training.
-
+The code is tested on python3.10 and pytorch2.6, cuda12.4.
 ```bash
-apt update
-apt install ffmpeg
-conda create -n deco python=3.12
-conda activate deco
 pip install -r requirements.txt
 ```
 
-## 2. Configuration
+## 2. Hyperparameters
 - Configuration files for DECO are provided in the `config/` directory.
 
 ```yaml
 model:
-  action_dim: 14              # DOF of the action (bimanual: 7 per arm)
-  chunk_size: 32              # Action chunk size
-  n_view: 3                   # Number of camera views
-  obs_state: False            # Whether to use proprioceptive states
-  obs_dim: 14                 # DOF of proprioception states
-  use_prompt: True            # Whether to condition the policy on language prompts (encoded offline)
+  action_dim: 7               # DOF of action
+  chunk_size: 16              # chunk size
+  n_view: 2                   # Number of camera views
+  obs_state: True             # Whether to use proprioceptive states
+  obs_dim: 8                  # DOF of proprioception states
+  use_task_condition: True    # Whether to enable one-hot task embedding
+  num_tasks: 40               # Number of tasks for one-hot embedding
   use_tactile: False          # Whether to use tactile observations
-  plugin: False               # Enable the plugin tactile adapter for a vision-based pretrained policy
-  plugin_rank: 32             # Rank of the plugin tactile adapter
+  plugin: False               # Enable plugin tactile adapter for vision-based pretrained policy
   num_attn_blocks: 6          # Number of transformer attention blocks
   inf_step: 5                 # Number of flow-matching inference steps
   heads: 8                    # Number of attention heads
   dim: 512                    # Model hidden dimension
-  rope_axes_dim: [192, 256]   # Rotary positional embedding dimensions for [height, width], matching img_size
-  pretrain_model_path: False  # Path to the vision-based pretrained policy checkpoint (for deployment)
-  adapter_model_path: False   # Path to the plugin tactile adapter (for deployment)
+  rope_axes_dim: [256, 256]   # Rotary positional embedding dimensions for [height, width], same to img_size
+  pretrain_model_path: False  # Path to vision-based pretrained policy checkpoint (for deployment)
+  adapter_model_path: False   # Path to plugin tactile adapter (for deployment)
 
 data:
-  chunk_size: 32              # Action chunk size
-  n_view: 3                   # Number of camera views
-  tac_left_max: 1000.0        # Maximum value of the left tactile sensor
-  tac_right_max: 1000.0       # Maximum value of the right tactile sensor
+  chunk_size: 16              # chunksize
+  n_view: 2                   # Number of camera views
+  tac_left_max: 3486.0        # Maximum value of left tactile sensor
+  tac_right_max: 4050.0       # Maximum value of right tactile sensor
   norm_type: 'mean_std'       # Normalization type: mean_std or min_max
   observation_mean: [...]     # Observation mean (computed via utils/cal_mean_std.py)
   observation_std: [...]      # Observation standard deviation
-  observation_min: [...]      # Observation minimum
+  observation_min: [...]      # Observation minimum 
   observation_max: [...]      # Observation maximum
   action_mean: [...]          # Action mean
   action_std: [...]           # Action standard deviation
   action_min: [...]           # Action minimum
   action_max: [...]           # Action maximum
-  img_size: [192, 256]        # [height, width]. Input images are resized to this resolution
+  img_size: [256, 256]        # [height, width]. Resize input images to this resolution
   img_mean: [0.485, 0.456, 0.406]  # ImageNet mean
   img_std: [0.229, 0.224, 0.225]   # ImageNet standard deviation
 ```
 
-
 ## 3. Dataset Preparation
 
-### Prepare Robotwin Dataset
+### Prepare LIBERO Dataset
 
-- Download the Robotwin dataset from HuggingFace:
+- Download the LIBERO dataset from HuggingFace:
 ```bash
-hf download StarVLA/RoboTwin-Randomized --repo-type dataset --local-dir ./
+hf download HuggingFaceVLA/libero --repo-type dataset --local-dir ./
 ```
 
-- Merge the clean and randomized data:
+- Convert the LIBERO data format:
 ```bash
-for dir in Clean/*/; do
-    name=$(basename "$dir")
-    mv "$dir" "Randomized/${name}_clean"
-done
+cd utils
+python convert_libero.py \
+  --data_path /path/to/libero/data/chunk-000 \
+  --save_path /path/to/output 
+
+python task2json.py \
+  --input /path/to/libero/meta/tasks.parquet \
+  --output /path/to/tasks.json
 ```
-- Download the T5 model and encode prompts offline:
+
+- The processed data structure:
+```
+datasets/
+├── episode_0000/
+│   ├── img1/              # External camera
+│   │   └── frame_*.png
+│   ├── img2/              # Wrist camera
+│   │   └── frame_*.png
+│   └── episode_info.pkl   # Contains state, action, task index
+└── tasks.json              # prompt → index mapping
+```
+
+### Prepare DexJoCo Dataset
+
+- Download the official DexJoCo dataset:
 ```bash
-hf download google-t5/t5-base --local-dir ./
-python prompt_encode.py # change the path first
+hf download DexJoCo/DexJoCo-Datasets-LeRobot \
+  --repo-type dataset \
+  --local-dir /path/to/DexJoCo-Datasets-LeRobot
 ```
 
-- The merged data structure is as follows:
-```text
-RoboTwin/
-├── Randomized/   # LeRobot v2.1 data format combined clean and randomized data
-│     adjust_bottle/            # Randomized data
-│        data/chunk-000
-│        meta/
-│        prompt/
-│        videos/chunk-000
-│     adjust_bottle_clean/      # Clean data
-│     ...
-│     turn_switch/
-│     turn_switch_clean/
-
-# train.py --data should be the path to the Randomized directory
-# e.g., train.py --data ./dataset/robotwin/Randomized
+- Convert both `rand_obj` and `rand_full` data to the DECO format:
+```bash
+python utils/convert_dexjoco.py \
+  --data_path /path/to/DexJoCo-Datasets-LeRobot \
+  --save_path /path/to/deco_dexjoco \
+  --workers 32
 ```
 
+The converter requires `pyarrow` and the `ffmpeg` system command. They can be installed with:
+```bash
+pip install pyarrow==24.0.0
+sudo apt-get install ffmpeg
+```
 
+The converted episodes are saved under `/path/to/deco_dexjoco/data`. Each episode contains `img1`, `img2`, optional `img3`, and `episode_info.pkl`.
+
+### Prepare UniVTAC Dataset
+- Download the UniVTAC dataset from HuggingFace:
+```bash
+hf download HuggingFaceVLA/UniVTAC \
+  --repo-type dataset \
+  --local-dir ./datasets/UniVTAC/
+```
+
+- Convert the UniVTAC data format:
+```bash
+python utils/convert.py \
+  --data_path ./datasets/UniVTAC \
+  --save_path ./datasets/UniVTAC_converted
+```
 
 
 ## 4. Training
+
+Use `--dataset` to select the dataset type: `libero` (default), `dexjoco`, or `univtac`.
+Three simulation datasets were trained on 8 × A100 GPUs. The initial learning rate was set to 1 × 10⁻⁴ and decayed to 1 × 10⁻⁶, with a total batch size of 1024. LIBERO was trained for 300 epochs, while the other two simulation datasets were trained for 200 epochs.
 
 - **Multi-GPU training**
 ```bash
@@ -120,15 +151,16 @@ torchrun --nproc_per_node 8 \
   --distributed True \
   --amp True \
   --device_id '0,1,2,3,4,5,6,7' \
-  --config ./config/DECO_robotwin.yaml \
-  --data /path/to/robotwin/randz \
+  --config ./config/deco_libero_80m.yaml \
+  --data /path/to/libero/data \
+  --dataset libero \
   --lr 1e-4 \
   --lr_f 1e-6 \
-  --batch-size 1024 \
+  --batch_size 1024 \
   --num-workers 16 \
-  --epochs 40 \
-  --logs ./logs/ \
-  --save_period 10
+  --epochs 300 \
+  --logs ./logs/libero_deco/ \
+  --save_period 50
 ```
 - **Single-GPU training**
 ```bash
@@ -136,106 +168,153 @@ python train.py \
   --distributed False \
   --amp False \
   --device_id '0' \
-  --config ./config/DECO_robotwin.yaml \
-  --data /path/to/robotwin/data \
+  --config ./config/deco_libero_80m.yaml \
+  --data /path/to/libero/data \
+  --dataset libero \
   --lr 1e-4 \
   --lr_f 1e-6 \
-  --batch-size 128 \
+  --batch_size 128 \
   --num-workers 16 \
-  --epochs 40 \
-  --logs ./logs/ \
-  --save_period 10
+  --epochs 300 \
+  --logs ./logs/libero_deco/ \
+  --save_period 50
 ```
 
 ## 5. Evaluation
-- Download our model checkpoint (trained for 40 epochs on the clean + randomized data with the default settings):
+
+### Eval LIBERO
+
+- Install LIBERO:
 ```bash
-hf download BAAI-Humanoid/DECO_sim --repo-type model --local-dir ./
+# NOTE: mujoco version must be 3.3.2
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+# Install the required dependencies and set up the environment according to the official instructions.
+cd LIBERO && pip install -e .
 ```
-- Clone the official repository and install the RoboTwin dependencies following the instructions in the repository:
+
+- Patch LIBERO for high PyTorch versions (`LIBERO/libero/libero/benchmark/__init__.py` line 164):
+```python
+init_states = torch.load(init_states_path, weights_only=False)
+```
+- Download weight from huggingface
 ```bash
-git clone https://github.com/RoboTwin-Platform/RoboTwin.git
+hf download BAAI-Humanoid/DECO_sim --repo-type model --local-dir ./sim_ckpt/
 ```
-- RoboTwin was recently updated to support XPolicyLab. For convenience, we support both the new and the legacy evaluation setups.
-
-### RoboTwin latest version
-- Move the `DECO/` directory under `robotwin_eval/` to `RoboTwin/XPolicyLab/policy/`.
-```
-mv robotwin_eval/DECO RoboTwin/XPolicyLab/policy/
-```
-- Update the path in `robotwin_eval/eval.sh`, then run `bash robotwin_eval/eval.sh`.
-
-### RoboTwin legacy version
-- Move the `DECO_o/` directory under `robotwin_eval/` to `RoboTwin/policy/` and rename it to `DECO`.
-```
-mv robotwin_eval/DECO_o RoboTwin/policy/DECO
-```
-- Update the paths in `deploy_policy.py`.
-- Move `robotwin_eval/eval_all_tasks.py` to the `RoboTwin/script/` directory, then run:
+- Configure `eval_libero.py`: set `yaml_path`, `task_suite_name`, `task_config` and the checkpoint path in [`yaml`](https://github.com/1343744768/IL_training_codebase/blob/main/config/deco_libero_80m.yaml#L16).
+- Run evaluation:
 ```bash
-mv robotwin_eval/eval_all_tasks.py RoboTwin/script/
-cd RoboTwin
-# ~7 GB memory usage per GPU
-python script/eval_all_tasks.py --gpus 0,1,2,3,4,5,6,7 --policy DECO --max-tasks-per-gpu 2
-``` 
+export MUJOCO_GL=egl
+python eval_libero.py
+```
 
-## 6. Results
-DECO achieves these results with a model of only about **80M parameters**. Success rates (%) of DECO on the 50 RoboTwin dual-arm tasks under the **Seen** and **Unseen** settings, with 100 trials per task.
+- LIBERO Results: Success rates (50 trials per task):
 
-| Task | Seen Clean | Seen Randomized | Seen Avg. | Unseen Clean | Unseen Randomized | Unseen Avg. |
-|------|-----------:|----------------:|----------:|-------------:|------------------:|------------:|
-| adjust_bottle | 100.00 | 100.00 | 100.00 | 99.00 | 99.00 | 99.00 |
-| beat_block_hammer | 96.00 | 86.00 | 91.00 | 98.00 | 90.00 | 94.00 |
-| blocks_ranking_rgb | 72.00 | 65.00 | 68.50 | 75.00 | 65.00 | 70.00 |
-| blocks_ranking_size | 44.00 | 38.00 | 41.00 | 42.00 | 40.00 | 41.00 |
-| click_alarmclock | 95.00 | 88.00 | 91.50 | 93.00 | 92.00 | 92.50 |
-| click_bell | 95.00 | 95.00 | 95.00 | 94.00 | 90.00 | 92.00 |
-| dump_bin_bigbin | 96.00 | 95.00 | 95.50 | 98.00 | 97.00 | 97.50 |
-| grab_roller | 98.00 | 99.00 | 98.50 | 100.00 | 99.00 | 99.50 |
-| handover_block | 97.00 | 86.00 | 91.50 | 97.00 | 87.00 | 92.00 |
-| handover_mic | 100.00 | 96.00 | 98.00 | 99.00 | 97.00 | 98.00 |
-| hanging_mug | 43.00 | 26.00 | 34.50 | 30.00 | 33.00 | 31.50 |
-| lift_pot | 100.00 | 100.00 | 100.00 | 100.00 | 99.00 | 99.50 |
-| move_can_pot | 85.00 | 83.00 | 84.00 | 77.00 | 79.00 | 78.00 |
-| move_pillbottle_pad | 93.00 | 92.00 | 92.50 | 91.00 | 88.00 | 89.50 |
-| move_playingcard_away | 100.00 | 96.00 | 98.00 | 98.00 | 99.00 | 98.50 |
-| move_stapler_pad | 85.00 | 87.00 | 86.00 | 87.00 | 85.00 | 86.00 |
-| open_laptop | 96.00 | 100.00 | 98.00 | 96.00 | 100.00 | 98.00 |
-| open_microwave | 88.00 | 84.00 | 86.00 | 85.00 | 86.00 | 85.50 |
-| pick_diverse_bottles | 84.00 | 77.00 | 80.50 | 85.00 | 74.00 | 79.50 |
-| pick_dual_bottles | 90.00 | 92.00 | 91.00 | 93.00 | 93.00 | 93.00 |
-| place_a2b_left | 63.00 | 59.00 | 61.00 | 62.00 | 58.00 | 60.00 |
-| place_a2b_right | 53.00 | 47.00 | 50.00 | 49.00 | 50.00 | 49.50 |
-| place_bread_basket | 92.00 | 81.00 | 86.50 | 92.00 | 86.00 | 89.00 |
-| place_bread_skillet | 91.00 | 81.00 | 86.00 | 91.00 | 83.00 | 87.00 |
-| place_burger_fries | 97.00 | 100.00 | 98.50 | 99.00 | 98.00 | 98.50 |
-| place_can_basket | 79.00 | 71.00 | 75.00 | 78.00 | 74.00 | 76.00 |
-| place_cans_plasticbox | 100.00 | 99.00 | 99.50 | 100.00 | 99.00 | 99.50 |
-| place_container_plate | 99.00 | 97.00 | 98.00 | 95.00 | 97.00 | 96.00 |
-| place_dual_shoes | 85.00 | 81.00 | 83.00 | 79.00 | 76.00 | 77.50 |
-| place_empty_cup | 99.00 | 100.00 | 99.50 | 97.00 | 98.00 | 97.50 |
-| place_fan | 92.00 | 93.00 | 92.50 | 93.00 | 99.00 | 96.00 |
-| place_mouse_pad | 83.00 | 75.00 | 79.00 | 85.00 | 74.00 | 79.50 |
-| place_object_basket | 89.00 | 89.00 | 89.00 | 86.00 | 83.00 | 84.50 |
-| place_object_scale | 77.00 | 68.00 | 72.50 | 77.00 | 67.00 | 72.00 |
-| place_object_stand | 90.00 | 87.00 | 88.50 | 96.00 | 85.00 | 90.50 |
-| place_phone_stand | 83.00 | 85.00 | 84.00 | 77.00 | 83.00 | 80.00 |
-| place_shoe | 98.00 | 98.00 | 98.00 | 98.00 | 100.00 | 99.00 |
-| press_stapler | 82.00 | 84.00 | 83.00 | 81.00 | 87.00 | 84.00 |
-| put_bottles_dustbin | 87.00 | 88.00 | 87.50 | 83.00 | 86.00 | 84.50 |
-| put_object_cabinet | 75.00 | 84.00 | 79.50 | 84.00 | 79.00 | 81.50 |
-| rotate_qrcode | 85.00 | 93.00 | 89.00 | 85.00 | 87.00 | 86.00 |
-| scan_object | 88.00 | 89.00 | 88.50 | 92.00 | 90.00 | 91.00 |
-| shake_bottle | 100.00 | 98.00 | 99.00 | 100.00 | 98.00 | 99.00 |
-| shake_bottle_horizontally | 100.00 | 99.00 | 99.50 | 100.00 | 99.00 | 99.50 |
-| stack_blocks_three | 85.00 | 83.00 | 84.00 | 85.00 | 81.00 | 83.00 |
-| stack_blocks_two | 96.00 | 99.00 | 97.50 | 97.00 | 98.00 | 97.50 |
-| stack_bowls_three | 83.00 | 83.00 | 83.00 | 81.00 | 78.00 | 79.50 |
-| stack_bowls_two | 96.00 | 95.00 | 95.50 | 99.00 | 98.00 | 98.50 |
-| stamp_seal | 61.00 | 75.00 | 68.00 | 69.00 | 71.00 | 70.00 |
-| turn_switch | 63.00 | 72.00 | 67.50 | 69.00 | 64.00 | 66.50 |
-| **Overall** | **86.56** | **84.76** | **85.66** | **86.32** | **84.36** | **85.34** |
+| Model | Spatial | Object | Goal | Long | **Average** |
+|:-----:|:--------------:|:-------------:|:-----------:|:---------:|:-----------:|
+| DECO | 94.2% | 99.4% | 96.8% | 86.4% | **94.2%** |
 
+### Eval DexJoCo
+
+DexJoCo evaluation requires a separate environment because it runs the MuJoCo simulator online. Create the evaluation environment and install the official DexJoCo package:
+```bash
+git clone https://github.com/brave-eai/dexjoco.git
+# Install the required dependencies and set up the environment according to the official instructions.
+pip install -e ./dexjoco/dexjoco
+```
+Download weight from huggingface
+```bash
+hf download BAAI-Humanoid/DECO_sim --repo-type model --local-dir ./sim_ckpt/
+```
+Run DexJoCo evaluation with headless EGL rendering:
+```bash
+export MUJOCO_GL=egl
+
+python eval_dexjoco.py \
+  --config ./config/deco_dexjoco_80m.yaml \
+  --checkpoint /path/to/best.pth \
+  --dexjoco-root /path/to/dexjoco \
+  --regime rand_obj \
+  --tasks all \
+  --save-video
+```
+
+The command evaluates all 11 tasks under `rand_obj`. Change `--regime` to `rand_full` for full visual randomization, and omit `--save-video` if rollout videos are not needed.
+
+- DexJoCo Results: Success rates (50 trials per task). `/B` denotes a bimanual task.
+
+| Model | Hammer Nail | Click Mouse | Pick Bucket | Pinch Tongs | Fold Glasses | Water Plant | Unlock iPad /B | Hanoi /B | Assembly /B | Microwave /B | Photograph /B | **Average** |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| DECO (rand-obj) | 68 | 90 | 80 | 46 | 50 | 88 | 40 | 18 | 0 | 64 | 76 | **56.4** |
+| DECO (rand-full) | 66 | 82 | 88 | 52 | 52 | 80 | 40 | 24 | 16 | 72 | 66 | **58** |
+
+### Eval UniVTAC
+- Install UniVTAC:
+> We test our policy on UniVTAC by using the official installation script at commit 05bcd3e
+> https://github.com/univtac/UniVTAC
+
+```bash
+# manually create a conda environment
+conda create -n UniVTAC python=3.10 -y
+conda env update -n UniVTAC --file ./third_party/TacEx/source/tacex_uipc/libuipc/conda/env.yaml
+conda activate UniVTAC
+# install vcpkg
+mkdir -p ~/Toolchain && cd ~/Toolchain
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+./bootstrap-vcpkg.sh -disableMetrics
+# set toolchain environment variable
+export CMAKE_TOOLCHAIN_FILE="$HOME/Toolchain/vcpkg/scripts/buildsystems/vcpkg.cmake"
+
+# install using official installation script
+cd ~
+git clone https://github.com/univtac/UniVTAC.git
+cd UniVTAC
+bash scripts/install.sh
+```
+
+Test two of our policies on UniVTAC:
+- Download policy and modify config files:
+Download from HuggingFace:
+```shell
+cd DECO
+hf download BAAI-Humanoid/DECO_sim --repo-type model --local-dir ./sim_ckpt/
+```
+If you use a different path to download the policies, please modify the config files accordingly.
+```yaml
+#DECO/config/deco_univtac_80m.yaml
+model:
+  #...
+  pretrain_model_path: sim_ckpt/univtac.pth
+  adapter_model_path: False
+
+#DECO/config/deco.p_univtac_80m.yaml
+model:
+  #...
+  pretrain_model_path: sim_ckpt/univtac-p.pth
+  adapter_model_path: sim_ckpt/univtac-p.pth
+```
+
+- Test our policies:
+You can evaluate these two policies on all tasks by running the following command:
+```shell
+cd DECO
+python run_evals.py --univtac_path ~/UniVTAC
+```
+or you can test a specific policy on a specific task:
+```shell
+cd DECO
+python eval_univtac.py \                                    
+  --univtac_path ~/UniVTAC \
+  --model-config config/deco_univtac_80m.yaml \
+  --task_name lift_can
+```
+
+- UniVTAC Results: Success rates (100 trials per task):
+
+| Model | grasp_classify | lift_can | lift_bottle | pull_out_key | put_bottle_in_shelf | insert_hole | insert_tube | insert_HDMI | **Average** |
+|:-----:|:--------------:|:-------------:|:-----------:|:---------:|:---------:|:---------:|:---------:|:---------:|:-----------:|
+| DECO (vision) | 96.0% | 99.0% | 100.0% | 96.0% | 90.0% | 63.0% | 88.0% | 25.0% | **82.1%** |
+| DECO.p (+tactile) | 99.0% | 99.0% | 100.0% | 96.0% | 93.0% | 59.0% | 88.0% | 23.0% | **82.1%** |
 
 # Citation
 If you find this project useful for your research, please consider citing our paper:

@@ -10,7 +10,7 @@ import torch.distributed as dist
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
-from dataset import leDataset
+from dataset import dexjoco_Dataset, libero_Dataset, univtac_Dataset
 from models import modeling, train as train_epoch, val as val_epoch
 from torchvision.transforms import v2 as transforms
 try:
@@ -158,7 +158,7 @@ def main(opt):
 
 
     config = yaml.safe_load(open(opt.config, 'r'))
-    act_dim, chunksize = config['model']['action_dim'], config['model']['chunk_size']
+    act_dim, chunksize, obs_state = config['model']['action_dim'], config['model']['chunk_size'], config['model']['obs_state']
     img_size = config['data']['img_size']
     img_mean, img_std = config['data']['img_mean'], config['data']['img_std']
         
@@ -181,8 +181,14 @@ def main(opt):
             mean=img_mean, 
             std=img_std)
         ])
-    train_dataset = leDataset(data_dir=opt.data, train=True, transform=train_transform, **config['data'])
-    test_dataset = leDataset(data_dir=opt.data, train=False, transform=test_transform, **config['data'])
+    if opt.dataset == 'dexjoco':
+        dataset_cls = dexjoco_Dataset
+    elif opt.dataset == 'univtac':
+        dataset_cls = univtac_Dataset
+    else:
+        dataset_cls = libero_Dataset
+    train_dataset = dataset_cls(data_dir=opt.data, train=True, transform=train_transform, **config['data'])
+    test_dataset = dataset_cls(data_dir=opt.data, train=False, transform=test_transform, **config['data'])
 
     if opt.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)
@@ -196,10 +202,10 @@ def main(opt):
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle,
                                                num_workers=opt.num_workers, pin_memory=True, drop_last=True,
-                                               sampler=train_sampler, persistent_workers=True, prefetch_factor=2)
+                                               sampler=train_sampler)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle,
                                               num_workers=opt.num_workers, pin_memory=True, drop_last=True,
-                                              sampler=val_sampler, persistent_workers=True, prefetch_factor=2)
+                                              sampler=val_sampler)
 
     net = modeling(**config['model']) 
         
@@ -225,7 +231,7 @@ def main(opt):
         net_without_ddp = net
 
     if opt.amp:
-        from torch.amp import GradScaler as GradScaler
+        from torch.cuda.amp import GradScaler as GradScaler
         scaler = GradScaler()
     else:
         scaler = None
@@ -239,13 +245,14 @@ def main(opt):
             print('use adamw')
         optimizer = torch.optim.AdamW(params=(p for p in net_without_ddp.parameters() if p.requires_grad), lr=opt.lr, betas=(0.95, 0.999), weight_decay=1e-6)
 
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.epochs * len(train_loader), eta_min=opt.lr_f)  # cosine LR decays per step; T_max = total training steps
-    warmup_scheduler = WarmUpLR(optimizer, opt.warm_up_steps)  # warmup decays per step; total warm_up_steps steps
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.epochs, eta_min=opt.lr_f)
+    warmup_scheduler = WarmUpLR(optimizer, len(train_loader) * opt.warm_up_epoch)
+    criterion = torch.nn.L1Loss(reduction='none')
 
     if opt.resume:
         if rank == 0:
             print('resume from last weights')
-        checkpoint = torch.load(os.path.join(old_dir, "last_weights.pth"), map_location='cpu')  # load previously saved weights (including optimizer and LR scheduler state)
+        checkpoint = torch.load(os.path.join(old_dir, "last_weights.pth"), map_location='cpu')  # 读取之前保存的权重文件(包括优化器以及学习率策略)
         net_without_ddp.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -261,9 +268,9 @@ def main(opt):
     for epoch in range(start_epoch, opt.epochs + 1):
         if opt.distributed:
             train_sampler.set_epoch(epoch)
-        train_loss = train_epoch(net, net_without_ddp, train_loader, optimizer, warmup_scheduler, lr_scheduler, epoch, opt, scaler, local_rank, rank)
+        train_loss = train_epoch(net, net_without_ddp, train_loader, optimizer, criterion, warmup_scheduler, epoch, opt, act_dim, obs_state, scaler, local_rank, rank)
         if epoch % opt.val_per_epoch == 0:
-            val_loss = val_epoch(net, test_loader, epoch, opt, act_dim, chunksize, local_rank, rank)
+            val_loss = val_epoch(net, test_loader, criterion, epoch, opt, act_dim, chunksize, obs_state, local_rank, rank)
         if val_loss < loss:
             loss = val_loss
             save_epoch = epoch
@@ -271,6 +278,9 @@ def main(opt):
                 print('save best model to logs!')
                 torch.save(net_without_ddp.state_dict(), os.path.join(opt.logs, 'best.pth'))
                 
+        if epoch > opt.warm_up_epoch:
+            lr_scheduler.step()
+            
         if rank == 0:
             loss_history.append_loss(train_loss, val_loss)
             print('current best epoch:', save_epoch, '\n')
@@ -289,17 +299,18 @@ def main(opt):
 if __name__ == '__main__':
     start_time = time.time()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='/home/sunyu/galbot/codes/robotwin/config/DECO_robotwin.yaml', help='Path to configuration YAML file')
-    parser.add_argument('--data', type=str, default='/home/sunyu/yusun/dataset/robotwin/rand_ori', help='Path to dataset directory')
+    parser.add_argument('--config', type=str, default='./IL_training_codebase/config/deco_libero_80m.yaml', help='Path to configuration YAML file')
+    parser.add_argument('--data', type=str, default='.libero/data', help='Path to dataset directory')
+    parser.add_argument('--dataset', type=str, default='libero', choices=['libero', 'dexjoco', 'univtac'], help='Dataset type: libero, dexjoco, or univtac')
     parser.add_argument('--adamw', default=True, type=bool, help='Use AdamW optimizer instead of SGD')
     parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate')
     parser.add_argument('--lr_f', type=float, default=1e-6, help='Final learning rate (minimum for cosine annealing)')
-    parser.add_argument('--batch-size', type=int, default=64*8, help='Total batch size across all GPUs')
-    parser.add_argument('--warm_up_steps', type=int, default=300, help='Number of warmup steps for learning rate')
-    parser.add_argument('--epochs', type=int, default=40, help='Total number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=128*8, help='Total batch size across all GPUs')
+    parser.add_argument('--warm_up_epoch', type=int, default=1, help='Number of warmup epochs for learning rate')
+    parser.add_argument('--epochs', type=int, default=300, help='Total number of training epochs')
     parser.add_argument('--val_per_epoch', type=int, default=10, help='Number of epochs between validations')
-    parser.add_argument('--logs', type=str, default='/home/sunyu/galbot/codes/logs', help='Directory to save logs and models')
-    parser.add_argument('--save_period', type=int, default=10, help='Number of epochs between model checkpoints')
+    parser.add_argument('--logs', type=str, default='./logs/deco.p80m_univtac', help='Directory to save logs and models')
+    parser.add_argument('--save_period', type=int, default=20, help='Number of epochs between model checkpoints')
     parser.add_argument('--resume', action='store_true', help='Resume training from the most recent checkpoint')
     parser.add_argument('--local_rank', default=-1, type=int, help='Local rank for distributed training (auto-set by torch.distributed)')
     parser.add_argument('--distributed', default=True, type=bool, help='Enable Distributed Data Parallel (DDP) training')

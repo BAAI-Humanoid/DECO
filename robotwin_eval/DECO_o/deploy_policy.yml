@@ -1,7 +1,0 @@
-# Basic experiment configuration (keep unchanged)
-policy_name: DECO
-task_name: adjust_bottle
-task_config: demo_clean
-ckpt_setting: best
-seed: 0
-instruction_type: unseen

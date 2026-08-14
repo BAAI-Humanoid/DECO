@@ -1,0 +1,10 @@
+{
+  "grasp_classify": 0,
+  "insert_HDMI": 1,
+  "insert_hole": 2,
+  "insert_tube": 3,
+  "lift_bottle": 4,
+  "lift_can": 5,
+  "pull_out_key": 6,
+  "put_bottle_in_shelf": 7
+}
