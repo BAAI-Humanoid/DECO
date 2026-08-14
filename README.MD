@@ -20,8 +20,8 @@
 # News
 - We now support training and evaluation on four simulation benchmarks: LIBERO, DexJoCo, UniVTAC, and RoboTwin.
 - Separate branches are maintained to accommodate real-robot deployment and the different data formats and evaluation protocols of each simulator.
-- LIBERO, DexJoCo, and UniVTAC are on the `sim` branch.
-- RoboTwin adds a T5 encoder and an improved training data format; see the `robotwin` branch for details.
+- LIBERO, DexJoCo, and UniVTAC are on the [`sim`](https://github.com/BAAI-Humanoid/DECO/tree/sim) branch.
+- RoboTwin adds a T5 encoder and an improved training data format; see the [`robotwin`](https://github.com/BAAI-Humanoid/DECO/tree/robotwin) branch for details.
 - Our 80M model achieves near-SOTA results across the four benchmarks, summarized below.
 
 **LIBERO** — success rates (50 trials per task):
