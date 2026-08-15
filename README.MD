@@ -116,6 +116,7 @@ RoboTwin/
 
 ## 4. Training
 
+- NOTE: If your machine is short on memory, disable `persistent_workers` and set `prefetch_factor=1` with `num_workers=8`; otherwise you risk having DataLoader workers OOM-killed during training.
 - **Multi-GPU training**
 ```bash
 torchrun --nproc_per_node 8 \
