@@ -39,7 +39,7 @@ class univtac_Dataset(Dataset):
         
         for episode in episode_list:
             episode_path = os.path.join(data_dir, episode, 'img1')
-            self.lable_dict[episode] = os.path.join(episode, 'episode_info.pkl')
+            self.lable_dict[episode] = pd.read_pickle(os.path.join(data_dir, episode, 'episode_info.pkl'))
             for img in os.listdir(episode_path):
                 self.img_list.append(os.path.join(episode, 'img1', img))
 
@@ -83,7 +83,7 @@ class univtac_Dataset(Dataset):
         imgs = torch.stack([img1, img2], dim=0)
         tacs = torch.stack([tac1, tac2], dim=0)
         
-        label_pkl = pd.read_pickle(os.path.join(self.root, self.lable_dict[episode_id]))
+        label_pkl = self.lable_dict[episode_id]
         task_condition = torch.tensor(label_pkl.iloc[img_idx]['task'], dtype=torch.long)
         obs_state = torch.tensor(label_pkl.iloc[img_idx]['state']).float()
         action = np.stack(label_pkl.iloc[img_idx:]['action'], axis=0)
@@ -147,7 +147,7 @@ class libero_Dataset(Dataset):
         
         for episode in episode_list:
             episode_path = os.path.join(data_dir, episode, 'img1')
-            self.lable_dict[episode] = os.path.join(episode, 'episode_info.pkl')
+            self.lable_dict[episode] = pd.read_pickle(os.path.join(data_dir, episode, 'episode_info.pkl'))
             for img in os.listdir(episode_path):
                 self.img_list.append(os.path.join(episode, 'img1', img))
         
@@ -174,7 +174,7 @@ class libero_Dataset(Dataset):
         imgs = torch.stack([img1, img2], dim=0)
         tacs = torch.stack([torch.tensor([-1.]), torch.tensor([-1.])], dim=0)
         
-        label_pkl = pd.read_pickle(os.path.join(self.root, self.lable_dict[episode_id]))
+        label_pkl = self.lable_dict[episode_id]
         task_condition = torch.tensor(label_pkl.iloc[img_idx]['task'], dtype=torch.long)
         obs_state = torch.tensor(label_pkl.iloc[img_idx]['state']).float()
         action = np.stack(label_pkl.iloc[img_idx:]['action'], axis=0)
@@ -238,7 +238,7 @@ class dexjoco_Dataset(Dataset):
 
         for episode in episode_list:
             episode_path = os.path.join(data_dir, episode, 'img1')
-            self.label_dict[episode] = os.path.join(episode, 'episode_info.pkl')
+            self.label_dict[episode] = pd.read_pickle(os.path.join(data_dir, episode, 'episode_info.pkl'))
             for img in os.listdir(episode_path):
                 self.img_list.append(os.path.join(episode, 'img1', img))
 
@@ -251,7 +251,7 @@ class dexjoco_Dataset(Dataset):
         img2_path = img1_path.replace('img1', 'img2')
         img3_path = img1_path.replace('img1', 'img3')
 
-        label_pkl = pd.read_pickle(os.path.join(self.root, self.label_dict[episode_id]))
+        label_pkl = self.label_dict[episode_id]
         is_bimanual = bool(label_pkl.iloc[img_idx]['is_bimanual'])
 
         img1 = Image.open(img1_path).convert('RGB')
